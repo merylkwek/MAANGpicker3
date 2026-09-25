@@ -1,6 +1,8 @@
 import { GoogleGenAI, mcpToTool } from '@google/genai';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { createMaangServer } from '../lib/maangMcpServer.js';
 
 export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
@@ -53,6 +55,32 @@ export default async function handler(req, res) {
   const unavailable = [];
   const nameMap = new Map();
 
+  function wrapClientForGemini(client) {
+    const origListTools = client.listTools.bind(client);
+    client.listTools = async (...args) => {
+      const result = await origListTools(...args);
+      if (result && Array.isArray(result.tools)) {
+        result.tools = result.tools.map((t) => {
+          // Gemini tool names must match ^[a-zA-Z_][a-zA-Z0-9_]*$
+          const clean = t.name.replace(/[^a-zA-Z0-9_]/g, '_').replace(/^_+/, '');
+          const valid = /^[a-zA-Z_]/.test(clean) ? clean : `mcp_${clean}`;
+          nameMap.set(valid, t.name);
+          return {
+            ...t,
+            name: valid
+          };
+        });
+      }
+      return result;
+    };
+
+    const origCallTool = client.callTool.bind(client);
+    client.callTool = async (params, ...rest) => {
+      const originalName = nameMap.get(params.name) || params.name;
+      return origCallTool({ ...params, name: originalName }, ...rest);
+    };
+  }
+
   for (const address of addresses) {
     let url;
     try {
@@ -74,34 +102,10 @@ export default async function handler(req, res) {
       const transport = new StreamableHTTPClientTransport(url);
       const connectPromise = client.connect(transport);
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Connection timed out after 8 seconds')), 8000)
+        setTimeout(() => reject(new Error('Connection timed out after 6 seconds')), 6000)
       );
       await Promise.race([connectPromise, timeoutPromise]);
-
-      // Wrap client listTools & callTool to sanitize function names for Gemini API
-      const origListTools = client.listTools.bind(client);
-      client.listTools = async (...args) => {
-        const result = await origListTools(...args);
-        if (result && Array.isArray(result.tools)) {
-          result.tools = result.tools.map((t) => {
-            const clean = t.name.replace(/[^a-zA-Z0-9_.:-]/g, '');
-            const valid = /^[a-zA-Z_]/.test(clean) ? clean : `mcp_${clean}`;
-            nameMap.set(valid, t.name);
-            return {
-              ...t,
-              name: valid
-            };
-          });
-        }
-        return result;
-      };
-
-      const origCallTool = client.callTool.bind(client);
-      client.callTool = async (params, ...rest) => {
-        const originalName = nameMap.get(params.name) || params.name;
-        return origCallTool({ ...params, name: originalName }, ...rest);
-      };
-
+      wrapClientForGemini(client);
       connectedClients.push(client);
     } catch (err) {
       unavailable.push({
@@ -111,6 +115,26 @@ export default async function handler(req, res) {
       try {
         await client.close();
       } catch {}
+    }
+  }
+
+  // Fallback: If no external MCP servers connected, use built-in MAANGpicker MCP server
+  let localServer = null;
+  if (connectedClients.length === 0) {
+    try {
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      localServer = createMaangServer();
+      await localServer.connect(serverTransport);
+
+      const localClient = new Client({
+        name: '[MAANGpicker]-internal-agent',
+        version: '1.0.0'
+      });
+      await localClient.connect(clientTransport);
+      wrapClientForGemini(localClient);
+      connectedClients.push(localClient);
+    } catch (err) {
+      console.error('Failed to initialize internal MCP server fallback:', err);
     }
   }
 
@@ -130,22 +154,35 @@ export default async function handler(req, res) {
 
     let response;
     let lastErr;
-    // Retry once on transient 503
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        response = await ai.models.generateContent({
-          model: 'gemini-3.8-flash',
-          contents: question,
-          config
-        });
-        break;
-      } catch (err) {
-        lastErr = err;
-        if (attempt === 0 && (err?.status === 503 || String(err?.message).includes('503'))) {
-          await new Promise((r) => setTimeout(r, 1500));
-          continue;
+    let usedModel = 'gemini-3.8-flash';
+
+    // Try gemini-3.8-flash first; if 503 (high demand) or 429 (quota), retry or fallback to gemini-3.1-flash-lite
+    const candidateModels = ['gemini-3.8-flash', 'gemini-3.1-flash-lite'];
+
+    modelLoop: for (const model of candidateModels) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          response = await ai.models.generateContent({
+            model,
+            contents: question,
+            config
+          });
+          usedModel = model;
+          break modelLoop;
+        } catch (err) {
+          lastErr = err;
+          const status = err?.status || (err?.message?.includes('503') ? 503 : err?.message?.includes('429') ? 429 : 0);
+          if (status === 503 || status === 429) {
+            // If attempt 0, wait briefly and try once more before moving to next candidate model
+            if (attempt === 0) {
+              await new Promise((r) => setTimeout(r, 1200));
+              continue;
+            }
+          } else {
+            // Non-transient error, don't loop
+            throw err;
+          }
         }
-        throw err;
       }
     }
 
@@ -199,7 +236,7 @@ export default async function handler(req, res) {
       answer: response.text || '',
       tool_calls,
       unavailable,
-      model: 'gemini-3.8-flash',
+      model: usedModel,
       answered_at: new Date().toISOString()
     });
   } catch (err) {
@@ -231,6 +268,11 @@ export default async function handler(req, res) {
     for (const client of connectedClients) {
       try {
         await client.close();
+      } catch {}
+    }
+    if (localServer) {
+      try {
+        await localServer.close();
       } catch {}
     }
   }
