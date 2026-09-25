@@ -1,0 +1,6 @@
+{
+  "name": "MAANGpicker",
+  "description": "MAANG stock decision-maker providing real-time and historical price data, technical indicators, backtesting, and an MCP server endpoint at /api/mcp.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
