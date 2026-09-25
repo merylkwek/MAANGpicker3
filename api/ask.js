@@ -3,8 +3,27 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 export default async function handler(req, res) {
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Allow', 'POST, GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept, Authorization');
+    return res.status(204).end();
+  }
+
+  if (req.method === 'GET') {
+    return res.status(200).json({
+      name: 'MAANGpicker Gemini Agent',
+      endpoint: '/api/ask',
+      method: 'POST',
+      model: 'gemini-3.8-flash',
+      instructions: 'Send a POST request with JSON body {"question": "your question here"}.',
+      maxLength: 500
+    });
+  }
+
   if (req.method !== 'POST') {
-    res.setHeader('Allow', ['POST']);
+    res.setHeader('Allow', ['POST', 'GET', 'OPTIONS']);
     return res.status(405).json({ error: `Method ${req.method} not allowed` });
   }
 

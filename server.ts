@@ -17,12 +17,11 @@ async function startServer() {
 
   app.use(express.json());
 
-  // MCP Server endpoint (POST for JSON-RPC, GET returns 405 Method Not Allowed)
-  app.post('/api/mcp', mcpHandler);
-  app.get('/api/mcp', mcpHandler);
+  // MCP Server endpoint (POST for JSON-RPC, GET for SSE/info, OPTIONS for CORS)
+  app.all('/api/mcp', mcpHandler);
 
   // Gemini Agent endpoint
-  app.post('/api/ask', askHandler);
+  app.all('/api/ask', askHandler);
 
   // Existing Data API endpoints
   app.get('/api/stocks', stocksHandler);
