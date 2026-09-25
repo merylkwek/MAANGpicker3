@@ -3,6 +3,7 @@ import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import mcpHandler from './api/mcp.js';
+import askHandler from './api/ask.js';
 import stocksHandler from './api/stocks.js';
 import indicatorsHandler from './api/indicators.js';
 import backtestHandler from './api/backtest.js';
@@ -19,6 +20,9 @@ async function startServer() {
   // MCP Server endpoint (POST for JSON-RPC, GET returns 405 Method Not Allowed)
   app.post('/api/mcp', mcpHandler);
   app.get('/api/mcp', mcpHandler);
+
+  // Gemini Agent endpoint
+  app.post('/api/ask', askHandler);
 
   // Existing Data API endpoints
   app.get('/api/stocks', stocksHandler);

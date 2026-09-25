@@ -19,14 +19,18 @@ import {
   RefreshCw,
   AlertCircle,
   BarChart3,
-  Sliders,
   DollarSign,
   ArrowUpRight,
   ArrowDownRight,
   Target,
-  ShieldAlert,
   ChevronRight,
-  Sparkles
+  Sparkles,
+  Bot,
+  Send,
+  CheckCircle2,
+  XCircle,
+  HelpCircle,
+  ServerOff
 } from 'lucide-react';
 
 interface StockMeta {
@@ -64,9 +68,28 @@ interface StockAnalysis {
   prices: any[];
 }
 
+interface ToolCallItem {
+  name: string;
+  args: Record<string, any>;
+  failed: boolean;
+}
+
+interface UnavailableServerItem {
+  address: string;
+  reason: string;
+}
+
+interface AskResponseData {
+  answer: string;
+  tool_calls: ToolCallItem[];
+  unavailable: UnavailableServerItem[];
+  model: string;
+  answered_at: string;
+}
+
 export default function App() {
   const [selectedSymbol, setSelectedSymbol] = useState('AAPL');
-  const [activeSubView, setActiveSubView] = useState<'chart' | 'indicators' | 'backtest' | 'mcp'>('chart');
+  const [activeSubView, setActiveSubView] = useState<'chart' | 'indicators' | 'backtest' | 'mcp' | 'ask'>('chart');
   
   // All MAANG market data cache
   const [allStocksData, setAllStocksData] = useState<Record<string, any>>({});
@@ -89,6 +112,12 @@ export default function App() {
   const [mcpParams, setMcpParams] = useState({ symbol: 'AAPL', indicator: 'RSI', strategy: 'sma_crossover' });
   const [mcpResponse, setMcpResponse] = useState<any>(null);
   const [mcpLoading, setMcpLoading] = useState(false);
+
+  // Ask Agent state
+  const [question, setQuestion] = useState('');
+  const [askLoading, setAskLoading] = useState(false);
+  const [askError, setAskError] = useState<string | null>(null);
+  const [askResult, setAskResult] = useState<AskResponseData | null>(null);
 
   // Fetch all 5 MAANG stocks concurrently
   const fetchAllMarketData = async () => {
@@ -196,7 +225,7 @@ export default function App() {
 
       const smaTrend: 'BULLISH' | 'BEARISH' = currentPrice >= avg20 ? 'BULLISH' : 'BEARISH';
       const range = high20 - low20 || 1;
-      const positionInRange = (currentPrice - low20) / range; // 0 (at low) to 1 (at high)
+      const positionInRange = (currentPrice - low20) / range;
 
       let action: 'STRONG BUY' | 'BUY' | 'HOLD' | 'SELL';
       let buyPrice: number;
@@ -206,14 +235,12 @@ export default function App() {
 
       if (rsi < 42 || (positionInRange < 0.25 && smaTrend === 'BULLISH')) {
         action = rsi < 35 ? 'STRONG BUY' : 'BUY';
-        // Buy target near current or dip support; target sell at recent high or breakout
         buyPrice = +(currentPrice * 0.995).toFixed(2);
         sellPrice = +(Math.max(high20, currentPrice * 1.065)).toFixed(2);
         stopLoss = +(low20 * 0.985).toFixed(2);
         rationale = `RSI (${rsi}) indicates oversold rebound opportunity with support at $${low20.toFixed(2)}.`;
       } else if (rsi > 68 || positionInRange > 0.92) {
         action = 'SELL';
-        // Overbought: take profit at sell price; target rebuy at support
         sellPrice = +(currentPrice * 0.998).toFixed(2);
         buyPrice = +(low20 + (range * 0.25)).toFixed(2);
         stopLoss = +(high20 * 1.02).toFixed(2);
@@ -284,7 +311,7 @@ export default function App() {
   const chartData = useMemo(() => {
     if (!selectedAnalysis?.prices || selectedAnalysis.prices.length === 0) return [];
     return selectedAnalysis.prices.map((p) => ({
-      date: p.date.slice(5), // 'MM-DD'
+      date: p.date.slice(5),
       fullDate: p.date,
       close: p.close,
       open: p.open,
@@ -346,6 +373,36 @@ export default function App() {
     }
   };
 
+  // Run call to /api/ask
+  const handleAsk = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!question.trim() || askLoading) return;
+
+    setAskLoading(true);
+    setAskError(null);
+    try {
+      const res = await fetch('/api/ask', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          question: question.trim()
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || `HTTP error ${res.status}`);
+      }
+      setAskResult(data);
+    } catch (err: any) {
+      setAskError(err.message || 'Failed to get answer from agent.');
+    } finally {
+      setAskLoading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-indigo-500 selection:text-white">
       {/* Top Navigation */}
@@ -358,7 +415,7 @@ export default function App() {
             <div>
               <div className="font-semibold text-base text-white tracking-tight flex items-center gap-2">
                 MAANGpicker
-                <span className="text-xs text-slate-400 font-normal">| Stock Decision Engine & MCP Server</span>
+                <span className="text-xs text-slate-400 font-normal hidden sm:inline">| Stock Decision Engine & MCP Agent</span>
               </div>
             </div>
           </div>
@@ -368,6 +425,8 @@ export default function App() {
               <span>Updated: {lastRefreshed.toLocaleTimeString()}</span>
               <span aria-hidden="true">·</span>
               <span className="text-emerald-400 font-mono">Streamable HTTP /api/mcp</span>
+              <span aria-hidden="true">·</span>
+              <span className="text-indigo-400 font-mono">Agent /api/ask</span>
             </div>
             <button
               onClick={fetchAllMarketData}
@@ -582,6 +641,15 @@ export default function App() {
                   Backtest
                 </button>
                 <button
+                  onClick={() => setActiveSubView('ask')}
+                  className={`px-2.5 py-1 rounded-md font-medium transition flex items-center gap-1 ${
+                    activeSubView === 'ask' ? 'bg-indigo-600 text-white' : 'text-indigo-400 hover:text-indigo-200'
+                  }`}
+                >
+                  <Bot className="w-3.5 h-3.5" />
+                  Ask Agent
+                </button>
+                <button
                   onClick={() => setActiveSubView('mcp')}
                   className={`px-2.5 py-1 rounded-md font-medium transition ${
                     activeSubView === 'mcp' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'
@@ -701,7 +769,6 @@ export default function App() {
                             return null;
                           }}
                         />
-                        {/* Reference lines for Buy and Sell targets */}
                         {selectedAnalysis?.buyPrice > 0 && (
                           <ReferenceLine 
                             y={selectedAnalysis.buyPrice} 
@@ -750,6 +817,158 @@ export default function App() {
                     Upstream: Yahoo Finance (20 items max)
                   </div>
                 </div>
+              </div>
+            )}
+
+            {/* ASK AGENT SUBVIEW */}
+            {activeSubView === 'ask' && (
+              <div className="p-5 rounded-2xl bg-slate-900/60 border border-slate-800 space-y-4">
+                <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                  <div className="flex items-center gap-2.5">
+                    <div className="p-1.5 rounded-lg bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
+                      <Bot className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="font-semibold text-white text-sm">Ask MAANG Agent (/api/ask)</h3>
+                      <p className="text-xs text-slate-400">Powered by Gemini 3.8 Flash with MCP tools</p>
+                    </div>
+                  </div>
+                  <span className="text-[11px] font-mono text-slate-400">
+                    Max 500 chars
+                  </span>
+                </div>
+
+                {/* Question Form */}
+                <form onSubmit={handleAsk} className="space-y-3">
+                  <div className="relative">
+                    <textarea
+                      value={question}
+                      onChange={(e) => setQuestion(e.target.value.slice(0, 500))}
+                      placeholder="Ask any question about MAANG stock prices, indicators, or backtest strategies (e.g. 'What is the latest price of Apple and is it overbought?')..."
+                      rows={3}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition resize-none"
+                    />
+                    <div className="absolute bottom-2.5 right-3 text-[10px] font-mono text-slate-500">
+                      {question.length}/500
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap gap-1.5 text-xs">
+                      {[
+                        `Price of ${selectedSymbol}?`,
+                        `RSI for ${selectedSymbol}?`,
+                        `Backtest SMA for ${selectedSymbol}?`
+                      ].map((promptText, i) => (
+                        <button
+                          key={i}
+                          type="button"
+                          onClick={() => setQuestion(promptText)}
+                          className="px-2.5 py-1 rounded-lg bg-slate-800/80 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/60 transition text-[11px]"
+                        >
+                          {promptText}
+                        </button>
+                      ))}
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={askLoading || !question.trim()}
+                      className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs transition flex items-center gap-1.5 disabled:opacity-50 shadow-md shadow-indigo-600/20"
+                    >
+                      <Send className={`w-3.5 h-3.5 ${askLoading ? 'animate-spin' : ''}`} />
+                      <span>{askLoading ? 'Agent Thinking...' : 'Ask Agent'}</span>
+                    </button>
+                  </div>
+                </form>
+
+                {askError && (
+                  <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                    <span>{askError}</span>
+                  </div>
+                )}
+
+                {/* Answer and Breakdown */}
+                {askResult && (
+                  <div className="space-y-4 pt-3 border-t border-slate-800/80">
+                    {/* The Answer */}
+                    <div className="p-4 rounded-xl bg-indigo-950/20 border border-indigo-500/30 space-y-2">
+                      <div className="flex items-center justify-between text-xs text-indigo-300 font-medium">
+                        <span className="flex items-center gap-1.5">
+                          <Sparkles className="w-3.5 h-3.5" />
+                          Answer
+                        </span>
+                        <span className="font-mono text-[10px] text-slate-400">
+                          {new Date(askResult.answered_at).toLocaleTimeString()} · {askResult.model}
+                        </span>
+                      </div>
+                      <p className="text-sm text-slate-200 leading-relaxed whitespace-pre-wrap">
+                        {askResult.answer}
+                      </p>
+                    </div>
+
+                    {/* Every tool called, in order, with its arguments */}
+                    <div className="space-y-2">
+                      <div className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                        <Terminal className="w-3.5 h-3.5 text-indigo-400" />
+                        Tools Called ({askResult.tool_calls.length})
+                      </div>
+                      {askResult.tool_calls.length === 0 ? (
+                        <div className="text-xs text-slate-500 italic p-2.5 rounded-lg bg-slate-950 border border-slate-800/60">
+                          No tool calls were executed for this query.
+                        </div>
+                      ) : (
+                        <div className="space-y-1.5">
+                          {askResult.tool_calls.map((call, idx) => (
+                            <div
+                              key={idx}
+                              className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 flex items-start justify-between text-xs font-mono gap-2"
+                            >
+                              <div className="space-y-1">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-slate-500 text-[10px]">#{idx + 1}</span>
+                                  <span className="font-bold text-indigo-300">{call.name}</span>
+                                </div>
+                                <div className="text-[11px] text-slate-400">
+                                  args: {JSON.stringify(call.args)}
+                                </div>
+                              </div>
+                              <span className={`text-[10px] px-2 py-0.5 rounded font-bold uppercase ${
+                                call.failed
+                                  ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                                  : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                              }`}>
+                                {call.failed ? 'Failed' : 'Success'}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Any unavailable servers in grey */}
+                    {askResult.unavailable && askResult.unavailable.length > 0 && (
+                      <div className="space-y-2 pt-2 border-t border-slate-800/60">
+                        <div className="text-xs font-semibold text-slate-500 flex items-center gap-1.5">
+                          <ServerOff className="w-3.5 h-3.5 text-slate-500" />
+                          Unavailable Servers ({askResult.unavailable.length})
+                        </div>
+                        <div className="space-y-1.5">
+                          {askResult.unavailable.map((srv, idx) => (
+                            <div
+                              key={idx}
+                              className="p-2.5 rounded-lg bg-slate-900/40 border border-slate-800/80 text-xs font-mono text-slate-500 flex flex-col sm:flex-row sm:items-center justify-between gap-1"
+                            >
+                              <span className="truncate max-w-sm">{srv.address}</span>
+                              <span className="text-[11px] text-slate-600">{srv.reason}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
@@ -960,8 +1179,139 @@ export default function App() {
             )}
           </div>
 
-          {/* RIGHT COLUMN: COMPLETE MAANG DECISION MATRIX & ACTION GUIDE */}
+          {/* RIGHT COLUMN: COMPLETE MAANG DECISION MATRIX & ASK AGENT PANEL */}
           <div className="lg:col-span-5 space-y-4">
+            {/* INLINE ASK AGENT PANEL: Always available on the screen */}
+            <div className="p-5 rounded-2xl bg-gradient-to-br from-indigo-950/30 via-slate-900 to-slate-900 border border-indigo-500/30 space-y-3.5 shadow-lg shadow-indigo-950/10">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="p-1 rounded-md bg-indigo-500/20 text-indigo-400 border border-indigo-500/30">
+                    <Bot className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-white text-sm">Ask MAANG Agent</h3>
+                    <p className="text-[11px] text-slate-400">Gemini 3.8 Flash + MCP Tool Selection (/api/ask)</p>
+                  </div>
+                </div>
+                <span className="text-[10px] font-mono text-indigo-400 bg-indigo-950/60 px-2 py-0.5 rounded border border-indigo-500/20">
+                  Live Agent
+                </span>
+              </div>
+
+              <form onSubmit={handleAsk} className="space-y-2.5">
+                <div className="relative">
+                  <textarea
+                    value={question}
+                    onChange={(e) => setQuestion(e.target.value.slice(0, 500))}
+                    placeholder="Ask about live prices, technical indicators, or backtests..."
+                    rows={2}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition resize-none"
+                  />
+                  <span className="absolute bottom-2 right-2.5 text-[9px] font-mono text-slate-500">
+                    {question.length}/500
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="flex gap-1">
+                    {['AAPL price?', 'META RSI?', 'AMZN SMA?'].map((q, idx) => (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => setQuestion(`What is the ${q.replace('?', '')}?`)}
+                        className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800/60 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-700/40 transition"
+                      >
+                        {q}
+                      </button>
+                    ))}
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={askLoading || !question.trim()}
+                    className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs transition flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    <Send className={`w-3 h-3 ${askLoading ? 'animate-spin' : ''}`} />
+                    <span>{askLoading ? 'Calling...' : 'Ask'}</span>
+                  </button>
+                </div>
+              </form>
+
+              {askError && (
+                <div className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs flex items-center gap-1.5">
+                  <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                  <span className="truncate">{askError}</span>
+                </div>
+              )}
+
+              {/* Display Result, Tool Calls, and Unavailable Servers */}
+              {askResult && (
+                <div className="space-y-3 pt-2.5 border-t border-slate-800/80">
+                  {/* The Answer */}
+                  <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 space-y-1">
+                    <span className="text-[10px] uppercase font-bold text-indigo-400 block tracking-wider">
+                      Answer ({askResult.model})
+                    </span>
+                    <p className="text-xs text-slate-200 leading-relaxed whitespace-pre-wrap">
+                      {askResult.answer}
+                    </p>
+                  </div>
+
+                  {/* Tool Calls in Order with Arguments */}
+                  <div className="space-y-1">
+                    <span className="text-[10px] uppercase font-bold text-slate-400 block tracking-wider">
+                      Tools Called ({askResult.tool_calls.length})
+                    </span>
+                    {askResult.tool_calls.length === 0 ? (
+                      <div className="text-[11px] text-slate-500 italic p-1.5 bg-slate-950 rounded border border-slate-800/60">
+                        No MCP tools called.
+                      </div>
+                    ) : (
+                      <div className="space-y-1">
+                        {askResult.tool_calls.map((c, i) => (
+                          <div
+                            key={i}
+                            className="p-2 rounded bg-slate-950 border border-slate-800/80 flex items-center justify-between text-[11px] font-mono"
+                          >
+                            <div className="truncate mr-2">
+                              <span className="text-indigo-400 font-bold">{c.name}</span>
+                              <span className="text-slate-500 ml-1.5">{JSON.stringify(c.args)}</span>
+                            </div>
+                            <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase ${
+                              c.failed ? 'text-rose-400 bg-rose-500/10' : 'text-emerald-400 bg-emerald-500/10'
+                            }`}>
+                              {c.failed ? 'Failed' : 'OK'}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Unavailable Servers in Grey */}
+                  {askResult.unavailable && askResult.unavailable.length > 0 && (
+                    <div className="space-y-1 pt-1.5 border-t border-slate-800/60">
+                      <span className="text-[10px] uppercase font-bold text-slate-500 block tracking-wider">
+                        Unavailable Servers ({askResult.unavailable.length})
+                      </span>
+                      <div className="space-y-1">
+                        {askResult.unavailable.map((u, i) => (
+                          <div
+                            key={i}
+                            className="p-1.5 rounded bg-slate-900/40 border border-slate-800 text-[10px] font-mono text-slate-500 flex items-center justify-between"
+                          >
+                            <span className="truncate max-w-[180px]">{u.address}</span>
+                            <span className="text-slate-600 text-[9px]">{u.reason}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Comprehensive Stock Decision Table */}
             <div className="p-5 rounded-2xl bg-slate-900/60 border border-slate-800 space-y-3">
               <div className="flex items-center justify-between">
                 <div>
@@ -978,7 +1328,6 @@ export default function App() {
                 </span>
               </div>
 
-              {/* Comprehensive Stock Decision Table */}
               <div className="space-y-2.5 pt-1">
                 {stockAnalyses.map((stock) => {
                   const isSelected = selectedSymbol === stock.symbol;
@@ -1046,28 +1395,6 @@ export default function App() {
                   );
                 })}
               </div>
-            </div>
-
-            {/* Quick Summary Card: Technical Setup Summary */}
-            <div className="p-4 rounded-2xl bg-slate-900/40 border border-slate-800 text-xs space-y-2">
-              <div className="font-semibold text-slate-200 flex items-center justify-between">
-                <span>Trading Rules Applied</span>
-                <span className="text-slate-500">20-Day Standard</span>
-              </div>
-              <ul className="text-slate-400 space-y-1 leading-relaxed text-[11px]">
-                <li className="flex items-start gap-1.5">
-                  <span className="text-emerald-400 font-bold">·</span>
-                  <span><strong>Buy Price:</strong> Support confluence near 20-day low / discount entry.</span>
-                </li>
-                <li className="flex items-start gap-1.5">
-                  <span className="text-rose-400 font-bold">·</span>
-                  <span><strong>Sell Price:</strong> Resistance take-profit target near 20-day high.</span>
-                </li>
-                <li className="flex items-start gap-1.5">
-                  <span className="text-indigo-400 font-bold">·</span>
-                  <span><strong>MCP Integration:</strong> External agents call <code className="text-indigo-300 font-mono">/api/mcp</code> for live tools.</span>
-                </li>
-              </ul>
             </div>
           </div>
         </div>
